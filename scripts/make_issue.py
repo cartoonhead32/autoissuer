@@ -42,13 +42,24 @@ def get_github_project(workspace_dir):
             for p in data.get("projects", []):
                 if not p.get("closed") and repo_name.lower() in p.get("title", "").lower():
                     return p.get("title")
-
-        for p in data.get("projects", []):
-            if not p.get("closed"):
-                return p.get("title")
     except Exception as e:
         print(f"Warning: Could not auto-detect GitHub project ({e})")
     return None
+
+def load_env(workspace_dir):
+    env_path = workspace_dir / ".env"
+    if env_path.exists():
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip("'\"")
+                    if key and key not in os.environ:
+                        os.environ[key] = val
 
 def get_existing_labels(workspace_dir):
     try:
@@ -269,6 +280,10 @@ You must respond with a JSON object in this format:
                 label_args += ["--label", l]
 
         project_name = get_github_project(workspace_dir)
+        if project_name:
+            print(f"Using GitHub project: '{project_name}'")
+        else:
+            print("No GitHub project specified or found.")
         project_args = ["--project", project_name] if project_name else []
 
         print("Creating GitHub issue...")
@@ -317,18 +332,11 @@ def main():
         SCRIPT_DIR = Path(__file__).resolve().parent
         WORKSPACE_DIR = SCRIPT_DIR.parent
 
+    load_env(WORKSPACE_DIR)
+    env_path = WORKSPACE_DIR / ".env"
+
     if use_bob:
         api_key = os.environ.get("BOBSHELL_API_KEY")
-        env_path = WORKSPACE_DIR / ".env"
-        
-        if not api_key and env_path.exists():
-            with open(env_path, "r") as f:
-                for line in f:
-                    if line.strip().startswith("BOBSHELL_API_KEY="):
-                        api_key = line.split("=", 1)[1].strip()
-                        os.environ["BOBSHELL_API_KEY"] = api_key
-                        break
-        
         if not api_key:
             print("A Bob Shell API key is required when using --bob flag.")
             print("Get your API key from: https://bob.ibm.com/admin/apikeys (Scope: Inference)")
@@ -346,16 +354,6 @@ def main():
                 sys.exit(1)
     else:
         api_key = os.environ.get("GEMINI_API_KEY")
-        env_path = WORKSPACE_DIR / ".env"
-        
-        if not api_key and env_path.exists():
-            with open(env_path, "r") as f:
-                for line in f:
-                    if line.strip().startswith("GEMINI_API_KEY="):
-                        api_key = line.split("=", 1)[1].strip()
-                        os.environ["GEMINI_API_KEY"] = api_key
-                        break
-        
         if not api_key:
             print("A Gemini API key is required to use the Gemini Client.")
             print("You can get a free API key from Google AI Studio: https://aistudio.google.com/")
