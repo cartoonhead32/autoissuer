@@ -189,7 +189,7 @@ def run_with_bob(prompt, resolved_commits):
     for attempt in range(max_retries):
         try:
             result = subprocess.run(
-                ["bob", "--auth-method", "api-key", "-p", prompt],
+                ["bob", "--auth-method", "api-key", "--chat-mode", "ask", "-p", prompt],
                 capture_output=True,
                 text=True,
                 check=True,
