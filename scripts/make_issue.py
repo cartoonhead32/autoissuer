@@ -217,7 +217,7 @@ def run_hybrid_mode(shas, workspace_dir, use_bob=False):
     prompt = f"""
 You are an expert developer. Analyze the following Git commits, file lists, and diffs.
 Generate:
-1. A professional, concise summary of what the changes do in the present tense in list form (Markdown format) to be used as an issue description. Limit the summary to at most 3-5 high-level bullet points summarizing the core functional changes in the present tense, keeping it brief and to the point.
+1. A professional, concise summary of what the changes do in the imperative mood (e.g. use "correct" instead of "corrects", "add" instead of "adds") in list form (Markdown format) to be used as an issue description. Limit the summary to at most 3-5 high-level bullet points summarizing the core functional changes in the imperative mood, keeping it brief and to the point.
    CRITICAL: The description must consist ONLY of a list of bullet points (e.g. - detail1\\n- detail2) with NO headers, markdown titles, or introductory/wrapping text. Do not include commit hashes in the description text itself.
 2. Based on the files changed, classify the changes into "Frontend" (if modifying UI, views/, public/, CSS/JS, HTML templates), "Backend" (if modifying server.js, backend APIs, DB files, docker compose), or both.
 3. A concise and descriptive issue title.
