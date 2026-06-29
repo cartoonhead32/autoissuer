@@ -28,23 +28,23 @@ def get_github_project(workspace_dir):
     env_project = os.environ.get("GH_PROJECT")
     if env_project:
         return env_project
-        
+
     repo_name, repo_owner = get_repo_info(workspace_dir)
-    
+
     try:
         args = ["project", "list", "--format", "json"]
         if repo_owner:
             args += ["--owner", repo_owner]
-            
+
         output = run_gh_command(args, workspace_dir)
         data = json.loads(output)
-        
+
         # Phase 1: Try to find an open project that contains the repo name in its title (case-insensitive)
         if repo_name:
             for p in data.get("projects", []):
                 if not p.get("closed") and repo_name.lower() in p.get("title", "").lower():
                     return p.get("title")
-                    
+
         # Phase 2: Fall back to the first open project in the list if no match is found
         for p in data.get("projects", []):
             if not p.get("closed"):
@@ -77,39 +77,39 @@ def ensure_label_exists(label, existing_labels, workspace_dir):
 def get_commits_context(shas, workspace_dir):
     resolved_commits = []
     diff_content = []
-    
+
     for sha in shas:
         full_sha = run_git_command(["rev-parse", sha], workspace_dir)
         msg = run_git_command(["log", "-1", "--format=%s", sha], workspace_dir)
         resolved_commits.append((full_sha, msg))
-        
+
         # Get list of changed files for complete context
         file_status = run_git_command(["show", "--name-status", "--oneline", sha], workspace_dir)
-        
+
         # Get git show diff excluding assets, lock files, and binaries
         diff = run_git_command([
             "show", sha, "--", ".",
-            ":(exclude)paintings/*", ":(exclude)img/*", ":(exclude)vendor/*", 
+            ":(exclude)paintings/*", ":(exclude)img/*", ":(exclude)vendor/*",
             ":(exclude)node_modules/*", ":(exclude)*lock*", ":(exclude)*.phar",
             ":(exclude)*.png", ":(exclude)*.jpg", ":(exclude)*.jpeg", ":(exclude)*.gif", ":(exclude)*.webp"
         ], workspace_dir)
-        
+
         # Truncate diff if it is too large to save token quota
         max_diff_len = 25000
         if len(diff) > max_diff_len:
             diff = diff[:max_diff_len] + f"\n\n... [Diff truncated to save API token quota (original size: {len(diff)} chars)] ..."
-            
+
         full_context = f"Changed Files:\n{file_status}\n\nDiff Content:\n{diff}"
         diff_content.append(full_context)
-        
+
     return resolved_commits, "\n\n".join(diff_content)
 
 def run_hybrid_mode(shas, workspace_dir):
     # Fetch git context
     resolved_commits, git_diff = get_commits_context(shas, workspace_dir)
-    
+
     commits_str = "\n".join(f"- {sha}: {msg}" for sha, msg in resolved_commits)
-    
+
     # Prompt for the AI to summarize and label (flat list requirement enforced)
     prompt = f"""
 You are an expert developer. Analyze the following Git commits, file lists, and diffs.
@@ -133,79 +133,82 @@ You must respond with a JSON object in this format:
 }}
 """
 
-    print("Requesting Gemini AI to summarize commits and determine categories...")
-    
-    from google import genai
-    from google.genai import types
-    from google.genai.errors import APIError
-    
-    client = genai.Client()
-    
+    print("Requesting IBM Bob Shell to summarize commits and determine categories...")
+
     response = None
     last_error = None
-    models_to_try = [
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-flash-latest'
-    ]
-    
-    def generate_content_with_retry(model_name, max_retries=3):
-        for attempt in range(max_retries):
-            try:
-                return client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                    )
-                )
-            except Exception as e:
-                err_msg = getattr(e, "message", str(e))
-                status_code = getattr(e, "status_code", None)
-                is_429 = (status_code == 429) or ("RESOURCE_EXHAUSTED" in err_msg) or ("429" in err_msg)
-                
-                if is_429 and attempt < max_retries - 1:
-                    sleep_time = 5.0
-                    match = re.search(r"Please retry in (\d+(\.\d+)?)s", err_msg)
-                    if match:
-                        sleep_time = float(match.group(1)) + 1.0
-                    print(f"Rate limit hit for {model_name} (attempt {attempt + 1}/{max_retries}). Sleeping for {sleep_time:.2f}s before retrying...")
-                    time.sleep(sleep_time)
-                else:
-                    raise e
-                    
-    for model_name in models_to_try:
+    max_retries = 3
+
+    for attempt in range(max_retries):
         try:
-            response = generate_content_with_retry(model_name)
-            # Break out of loop if successful
+            # Call Bob Shell CLI with API key authentication
+            result = subprocess.run(
+                ["bob", "--auth-method", "api-key", "-p", prompt],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=120
+            )
+            response = result.stdout.strip()
             break
-        except Exception as e:
+        except subprocess.TimeoutExpired:
+            last_error = Exception("Bob Shell request timed out")
+            if attempt < max_retries - 1:
+                print(f"Request timed out (attempt {attempt + 1}/{max_retries}). Retrying...")
+                time.sleep(2.0)
+            else:
+                print(f"Error: All retry attempts failed due to timeout.")
+                raise last_error
+        except subprocess.CalledProcessError as e:
             last_error = e
-            err_msg = getattr(e, "message", str(e))
-            print(f"Warning: {model_name} is currently unavailable ({err_msg}). Trying fallback...")
-            
+            err_msg = e.stderr if e.stderr else str(e)
+            is_rate_limit = "rate_limit" in err_msg.lower() or "429" in err_msg
+
+            if is_rate_limit and attempt < max_retries - 1:
+                sleep_time = 5.0 * (attempt + 1)
+                print(f"Rate limit hit (attempt {attempt + 1}/{max_retries}). Sleeping for {sleep_time:.2f}s before retrying...")
+                time.sleep(sleep_time)
+            elif attempt < max_retries - 1:
+                print(f"Warning: Request failed ({err_msg}). Retrying...")
+                time.sleep(2.0)
+            else:
+                print(f"Error: All retry attempts failed.")
+                raise e
+
     if response is None:
-        print("Error: All fallback Gemini models failed.")
+        print("Error: Failed to get response from IBM Bob Shell.")
         if last_error:
             raise last_error
         sys.exit(1)
+
+    # Extract JSON from response (may be wrapped in markdown code blocks or other text)
+    response_text = response.strip()
     
-    result_data = json.loads(response.text)
+    # Try to find JSON in the response
+    json_match = re.search(r'\{[^{}]*"title"[^{}]*"markdown"[^{}]*"labels"[^{}]*\}', response_text, re.DOTALL)
+    if json_match:
+        response_text = json_match.group(0)
+    elif "```json" in response_text:
+        response_text = response_text.split("```json")[1].split("```")[0].strip()
+    elif "```" in response_text:
+        response_text = response_text.split("```")[1].split("```")[0].strip()
+    
+    result_data = json.loads(response_text)
     title = result_data.get("title", f"Updates for commits: {', '.join(s[:7] for s, _ in resolved_commits)}")
     markdown_text = result_data.get("markdown", "")
     labels = result_data.get("labels", ["Backend"])
-    
+
     # Ensure description is written to the scripts directory
     script_dir = Path(__file__).resolve().parent
     desc_path = script_dir / "issue-description.md"
     try:
         with open(desc_path, "w") as f:
             f.write(markdown_text.strip() + "\n")
-            
+
         print(f"Written description to {desc_path}")
         print(f"Issue Title: '{title}'")
         print(f"Labels: {labels}")
-        
+
         # Resolve labels and ensure they exist
         resolved_labels = []
         for l in labels:
@@ -219,23 +222,23 @@ You must respond with a JSON object in this format:
         for l in resolved_labels:
             if ensure_label_exists(l, existing_labels, workspace_dir):
                 label_args += ["--label", l]
-            
+
         project_name = get_github_project(workspace_dir)
         project_args = ["--project", project_name] if project_name else []
-            
+
         print("Creating GitHub issue...")
         issue_url = run_gh_command(["issue", "create", "--title", title, "--body-file", str(desc_path), "--assignee", "@me"] + project_args + label_args, workspace_dir)
         print(f"Created issue: {issue_url}")
-        
+
         # Post comment
         comment_body = "Fixed in commits:\n"
         for full_sha, msg in resolved_commits:
             comment_body += f"- {full_sha} ({msg})\n"
-            
+
         print("Adding comment...")
         comment_url = run_gh_command(["issue", "comment", issue_url, "--body", comment_body], workspace_dir)
         print(f"Added comment: {comment_url}")
-        
+
         # Close issue
         print("Closing issue...")
         run_gh_command(["issue", "close", issue_url], workspace_dir)
@@ -264,32 +267,35 @@ def main():
         SCRIPT_DIR = Path(__file__).resolve().parent
         WORKSPACE_DIR = SCRIPT_DIR.parent
 
-    # Check for GEMINI_API_KEY in environment
-    api_key = os.environ.get("GEMINI_API_KEY")
+    # Check for BOBSHELL_API_KEY in environment
+    api_key = os.environ.get("BOBSHELL_API_KEY")
 
     # Load from .env if it exists
     env_path = WORKSPACE_DIR / ".env"
     if not api_key and env_path.exists():
         with open(env_path, "r") as f:
             for line in f:
-                if line.strip().startswith("GEMINI_API_KEY="):
+                line = line.strip()
+                if line.startswith("BOBSHELL_API_KEY="):
                     api_key = line.split("=", 1)[1].strip()
-                    os.environ["GEMINI_API_KEY"] = api_key
+                    os.environ["BOBSHELL_API_KEY"] = api_key
                     break
 
     # Prompt user if still missing
     if not api_key:
-        print("A Gemini API key is required to use the Gemini Client.")
-        print("You can get a free API key from Google AI Studio: https://aistudio.google.com/")
+        print("A Bob Shell API key is required to use IBM Bob Shell.")
+        print("You can get an API key from: https://bob.ibm.com/admin/apikeys")
+        print("Set the Scope to 'Inference' when creating the key.")
         try:
-            api_key = input("Please enter your Gemini API key: ").strip()
+            api_key = input("Please enter your Bob Shell API key: ").strip()
             if not api_key:
                 print("Error: API key cannot be empty.")
                 sys.exit(1)
-            # Save it to .env
+            os.environ["BOBSHELL_API_KEY"] = api_key
+            
+            # Save to .env
             with open(env_path, "a") as f:
-                f.write(f"\nGEMINI_API_KEY={api_key}\n")
-            os.environ["GEMINI_API_KEY"] = api_key
+                f.write(f"\nBOBSHELL_API_KEY={api_key}\n")
             print(f"API key saved to {env_path}")
         except KeyboardInterrupt:
             print("\nCancelled.")
