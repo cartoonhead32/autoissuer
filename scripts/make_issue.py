@@ -25,8 +25,24 @@ def get_repo_info(workspace_dir):
 
 def get_github_project(workspace_dir):
     env_project = os.environ.get("GH_PROJECT")
-    if env_project:
-        return env_project
+    env_path = workspace_dir / ".env"
+
+    if not env_project:
+        print("A GitHub project is required to link created issues to.")
+        try:
+            env_project = input("Please enter your GitHub project name: ").strip()
+            if not env_project:
+                print("Error: GitHub project name cannot be empty.")
+                return None
+            
+            # Save to .env file
+            with open(env_path, "a") as f:
+                f.write(f"\nGH_PROJECT=\"{env_project}\"\n")
+            os.environ["GH_PROJECT"] = env_project
+            print(f"GitHub project name saved to {env_path}")
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            sys.exit(1)
 
     repo_name, repo_owner = get_repo_info(workspace_dir)
 
@@ -37,13 +53,15 @@ def get_github_project(workspace_dir):
 
         output = run_gh_command(args, workspace_dir)
         data = json.loads(output)
+        projects = data.get("projects", [])
 
-        if repo_name:
-            for p in data.get("projects", []):
-                if not p.get("closed") and repo_name.lower() in p.get("title", "").lower():
-                    return p.get("title")
+        # Verify the explicitly specified project exists (case-insensitive)
+        for p in projects:
+            if not p.get("closed") and p.get("title", "").lower() == env_project.lower():
+                return p.get("title")
+        print(f"Error: The project '{env_project}' specified in GH_PROJECT was not found or is closed.")
     except Exception as e:
-        print(f"Warning: Could not auto-detect GitHub project ({e})")
+        print(f"Warning: Could not fetch GitHub projects list ({e})")
     return None
 
 def load_env(workspace_dir):
@@ -283,8 +301,9 @@ You must respond with a JSON object in this format:
         if project_name:
             print(f"Using GitHub project: '{project_name}'")
         else:
-            print("No GitHub project specified or found.")
-        project_args = ["--project", project_name] if project_name else []
+            print("Error: No matching GitHub project specified or found. Aborting issue creation to let you correct the project name.")
+            sys.exit(1)
+        project_args = ["--project", project_name]
 
         print("Creating GitHub issue...")
         issue_url = run_gh_command(["issue", "create", "--title", title, "--body-file", str(desc_path), "--assignee", "@me"] + project_args + label_args, workspace_dir)
